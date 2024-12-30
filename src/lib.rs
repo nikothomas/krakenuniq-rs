@@ -182,7 +182,7 @@ pub fn classify_multiple_in_one_call(
     db_path: &str,
     db_index_path: &str,
     taxdb_path: &str,
-    reads_paths: &[&str],
+    reads_paths: Vec<&str>,
     print_sequence_in_kraken: bool,
     only_classified_kraken_output: bool,
     generate_report: bool,
