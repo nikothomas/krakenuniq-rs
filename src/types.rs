@@ -7,17 +7,14 @@ pub struct KrakenReportRow {
     pub reads: u64,
     pub tax_reads: u64,
     pub kmers: u64,
-    pub tax_kmers: u64,
-    pub kmers_db: u64,
-    pub tax_kmers_db: u64,
     pub dup: f64,
     pub cov: f64,
     pub tax_id: u32,
     pub rank: String,
     pub tax_name: String,
-    pub depth: usize,
-    pub parent_tax_id: Option<u32>,
-    pub children_tax_ids: Vec<u32>,
+    pub depth: usize,                // Still needed for indentation
+    pub parent_tax_id: Option<u32>,  // Keep for tree structure
+    pub children_tax_ids: Vec<u32>,  // Keep for tree structure
 }
 
 /// A structured representation of one Kraken output line.

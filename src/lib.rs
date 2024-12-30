@@ -32,9 +32,6 @@ pub struct ClassificationResults {
     /// A map from `taxid` -> read counts & unique k-mers (`ReadCounts`).
     pub taxon_counts: TaxonCounts,
 
-    /// CSV-style lines summarizing `(taxid, total_reads, unique_kmer_count)`.
-    pub taxon_counts_csv: String,
-
     /// Optionally, the final Kraken-style taxonomy report as text (if generated).
     pub kraken_report: Option<String>,
 
@@ -118,18 +115,6 @@ pub fn classify_in_one_call(
         );
     }
 
-    // 6. Build a CSV summary of taxon counts
-    let mut counts_csv = String::new();
-    for (taxid, counts) in &taxon_counts {
-        let _ = writeln!(
-            counts_csv,
-            "{},{},{}",
-            taxid,
-            counts.read_count,
-            counts.unique_kmers.len()
-        );
-    }
-
     // 7. Optionally build a Kraken-style taxonomy report (both text & structured rows)
     let (kraken_report_rows, kraken_report_text) = if generate_report {
         let total_reads = reads.len() as u64;
@@ -151,7 +136,6 @@ pub fn classify_in_one_call(
         classified_reads,
         unclassified_reads,
         taxon_counts,
-        taxon_counts_csv: counts_csv,
 
         // We'll store the text from the taxonomy report (if generated)
         kraken_report: kraken_report_text,
@@ -228,18 +212,6 @@ pub fn classify_multiple_in_one_call(
         );
     }
 
-    // 6. Build a CSV summary of taxon counts
-    let mut counts_csv = String::new();
-    for (taxid, counts) in &taxon_counts {
-        let _ = writeln!(
-            counts_csv,
-            "{},{},{}",
-            taxid,
-            counts.read_count,
-            counts.unique_kmers.len()
-        );
-    }
-
     // 7. Optionally build a Kraken-style taxonomy report
     let (kraken_report_rows, kraken_report_text) = if generate_report {
         let total_reads = all_reads.len() as u64;
@@ -261,7 +233,6 @@ pub fn classify_multiple_in_one_call(
         classified_reads,
         unclassified_reads,
         taxon_counts,
-        taxon_counts_csv: counts_csv,
         kraken_report: kraken_report_text,
         kraken_output_lines: kraken_output_structs,
         kraken_report_rows,
@@ -299,8 +270,6 @@ mod tests {
             .expect("Could not write classified_reads.fq");
         fs::write("unclassified_reads.fq", &results.unclassified_reads)
             .expect("Could not write unclassified_reads.fq");
-        fs::write("taxon_counts.csv", &results.taxon_counts_csv)
-            .expect("Could not write taxon_counts.csv");
 
         if let Some(report_text) = &results.kraken_report {
             fs::write("kraken_report.txt", report_text)
@@ -309,7 +278,6 @@ mod tests {
 
         // Basic checks
         assert!(!results.kraken_output.is_empty(), "Expected some classification output");
-        assert!(results.taxon_counts_csv.contains(','), "Expected CSV data for taxon counts");
 
         // Inspect the structured lines in memory:
         assert!(!results.kraken_output_lines.is_empty(), "Expected some structured Kraken lines");
