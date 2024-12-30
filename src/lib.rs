@@ -2,8 +2,8 @@ pub mod classify_sequence;
 pub mod krakendb;
 pub mod taxdb;
 pub mod fastq;
-mod classifications_stats;
-mod types;
+pub mod classifications_stats;
+pub mod types;
 
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
