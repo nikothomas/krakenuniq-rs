@@ -182,7 +182,7 @@ pub fn classify_multiple_in_one_call(
     db_path: &str,
     db_index_path: &str,
     taxdb_path: &str,
-    reads_paths: Vec<&str>,
+    reads_paths: Vec<String>,
     print_sequence_in_kraken: bool,
     only_classified_kraken_output: bool,
     generate_report: bool,
@@ -201,7 +201,7 @@ pub fn classify_multiple_in_one_call(
     // 4. Read all FASTQ/FASTQ.GZ files
     let mut all_reads: Vec<DNASequence> = Vec::new();
     for path in reads_paths {
-        let reads = read_fastq_records(path)?;
+        let reads = read_fastq_records(&*path.to_string())?;
         all_reads.extend(reads);
     }
 
