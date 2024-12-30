@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "krakenuniq-rs"
-version = "0.0.1-alpha.4"
+version = "0.0.1-alpha.5"
 dependencies = [
  "ahash",
  "flate2",
