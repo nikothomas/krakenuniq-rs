@@ -1,0 +1,9 @@
+[package]
+name = "krakenuniq-rs"
+version = "0.0.1-alpha"
+edition = "2021"
+
+[dependencies]
+log = "0.4"
+rayon = "1.7"        # for parallel read processing if you want
+thiserror = "2.0.9"  # for stable benchmarking
