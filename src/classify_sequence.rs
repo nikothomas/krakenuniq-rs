@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet, BTreeSet};
 use std::fmt::Write;
 use crate::krakendb::KrakenDB;
-use crate::types::{KrakenOutputLine, KrakenReportRow};
+use crate::types::{KrakenOutputLine};
 // -----------------------
 // These come from krakenutil.cpp's logic
 // -----------------------
@@ -58,7 +58,6 @@ fn break_ties(max_taxa: BTreeSet<u32>, parent_map: &ParentMap) -> u32 {
     let mut candidate = iter.next().unwrap();
 
     for t in iter {
-        let old_candidate = candidate;
         candidate = lca(parent_map, candidate, t);
     }
 
@@ -79,7 +78,7 @@ pub fn resolve_tree_kraken(
     let mut max_score = 0u32;
 
     // For each taxon in the map
-    for (&taxon, &count) in hit_counts {
+    for (&taxon, &_count) in hit_counts {
         // We'll climb from `taxon` to the root, summing any hits in `hit_counts`.
         let mut node = taxon;
         let mut score = 0u32;

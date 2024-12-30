@@ -16,7 +16,7 @@ use crate::classifications_stats::build_kraken_report;
 use crate::classify_sequence::{classify_sequence, TaxonCounts};
 use crate::fastq::read_fastq_records;
 use crate::krakendb::{KrakenDB, KrakenDBIndex};
-use crate::taxdb::{parse_taxdb, ParentMap, NameMap, RankMap};
+use crate::taxdb::{parse_taxdb, NameMap, RankMap};
 
 /// A simple struct to hold the final outputs in memory.
 pub struct ClassificationResults {

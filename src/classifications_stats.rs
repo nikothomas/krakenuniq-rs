@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use crate::types::KrakenReportRow;
-use super::classify_sequence::{TaxonCounts, ReadCounts};
+use super::classify_sequence::{TaxonCounts};
 use super::taxdb::{ParentMap, NameMap, RankMap};
 
 /// Holds per-node stats:
