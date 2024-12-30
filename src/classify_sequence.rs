@@ -115,9 +115,9 @@ pub struct DNASequence {
 }
 
 /// We now store each k-mer’s coverage in `kmer_counts`.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct ReadCounts {
-    pub read_count: u64,
+    pub read_count: u32,
 
     /// Map: k-mer => how many times it appears
     pub kmer_counts: AHashMap<u64, u32>,
@@ -198,55 +198,39 @@ fn encode_kmer_2bit_slice(seq_bytes: &[u8]) -> (u64, bool) {
     (val, true)
 }
 
-/// Classify one read using the “Kraken-like” approach:
-///  1. For each k-mer, see if we find a taxon => record in `hit_counts`.
-///  2. At end, `resolve_tree_kraken` picks the final taxon ID.
-///  3. Update `taxon_counts[call].read_count += 1` and record k-mer coverage.
+/// Modified to return classification status and avoid string building
 pub fn classify_sequence(
     dna: &DNASequence,
     kraken_dbs: &[KrakenDB],
     parent_map: &ParentMap,
     taxon_counts: &mut TaxonCounts,
-    kraken_output: &mut String,
-    classified_output: &mut String,
-    unclassified_output: &mut String,
     print_sequence_in_kraken: bool,
     only_classified_kraken_output: bool,
-    kraken_output_structs: &mut Vec<KrakenOutputLine>,
+    kraken_output_lines: &mut Vec<KrakenOutputLine>,
 ) -> bool {
     // If no DB provided, nothing to do
     if kraken_dbs.is_empty() {
         return false;
     }
 
-    // Assume all DBs share the same k
     let k = kraken_dbs[0].k as usize;
     let seq_len = dna.seq.len();
 
     // If read is too short => unclassified
     if seq_len < k {
-        let seq_header = if dna.seq.as_bytes().first() == Some(&b'>') {
-            ">some_fasta\n"
-        } else {
-            "@some_fastq\n"
-        };
-        let mut seq_out = String::new();
-        seq_out.push_str(seq_header);
-        seq_out.push_str(&dna.seq);
-        seq_out.push('\n');
-        unclassified_output.push_str(&seq_out);
-
         if !only_classified_kraken_output {
-            let _ = write!(
-                kraken_output,
-                "U\t{}\t0\t0:0{}\n",
-                dna.id,
-                if print_sequence_in_kraken {
-                    format!("\t{}", dna.seq)
+            kraken_output_lines.push(KrakenOutputLine {
+                status: 'U',
+                read_id: dna.id.clone(),
+                tax_id: 0,
+                length: 0,
+                hitlist: "0:0".to_string(),
+                sequence: if print_sequence_in_kraken {
+                    Some(dna.seq.clone())
                 } else {
-                    "".to_string()
-                }
-            );
+                    None
+                },
+            });
         }
         return false;
     }
@@ -255,14 +239,12 @@ pub fn classify_sequence(
     let seq_bytes = dna.seq.as_bytes();
     let mut assigned_taxa = Vec::with_capacity(span_count);
     let mut ambig_list = Vec::with_capacity(span_count);
-
-    // Temporary map: taxon => #k-mers assigned to it
     let mut hit_counts: AHashMap<u32, u32> = AHashMap::new();
 
+    // Process each k-mer
     for start in 0..span_count {
         let (encoded, is_valid) = encode_kmer_2bit_slice(&seq_bytes[start..start + k]);
         if !is_valid {
-            // e.g. “N” => skip
             assigned_taxa.push(0);
             ambig_list.push(true);
             continue;
@@ -280,93 +262,47 @@ pub fn classify_sequence(
             }
         }
 
-        // Record assigned taxon ID for printing
         assigned_taxa.push(found_taxon);
 
-        // If found, record coverage in `taxon_counts`
         if found_taxon != 0 {
-            // Bump “1 hit” in hit_counts
             *hit_counts.entry(found_taxon).or_insert(0) += 1;
-
-            // Also store coverage in the read-count struct
             let entry = taxon_counts.entry(found_taxon).or_default();
             entry.add_kmer_occurrence(canon_kmer);
         }
     }
 
-    // Summation-based classification
+    // Classify using the hit counts
     let call = resolve_tree_kraken(&hit_counts, parent_map);
 
-    // Increment read_count for final call
-    taxon_counts.entry(call).or_default().increment_read_count();
-
-    // Output FASTA/Q to classified or unclassified
-    let seq_header = if dna.seq.as_bytes().first() == Some(&b'>') {
-        ">some_fasta\n"
-    } else {
-        "@some_fastq\n"
-    };
-    let mut seq_out = String::new();
-    seq_out.push_str(seq_header);
-    seq_out.push_str(&dna.seq);
-    seq_out.push('\n');
-
-    if call == 0 {
-        unclassified_output.push_str(&seq_out);
-    } else {
-        classified_output.push_str(&seq_out);
+    // Update taxon counts for the final call
+    if call != 0 {
+        taxon_counts.entry(call).or_default().increment_read_count();
     }
 
+    // Skip unclassified output if requested
     if only_classified_kraken_output && call == 0 {
         return false;
     }
 
-    // Build a line: “C/U <read_id> <call> <read_len> <hitlist> [<seq>?]”
-    if call != 0 {
-        kraken_output.push_str("C\t");
-    } else {
-        kraken_output.push_str("U\t");
-    }
-
-    let read_len = dna.seq.len();
-    let _ = write!(kraken_output, "{}\t{}\t{}", dna.id, call, read_len);
-
-    kraken_output.push('\t');
-    if assigned_taxa.is_empty() {
-        kraken_output.push_str("0:0");
-    } else {
-        let hl = hitlist_string(&assigned_taxa, &ambig_list);
-        kraken_output.push_str(&hl);
-    }
-
-    if print_sequence_in_kraken {
-        kraken_output.push('\t');
-        kraken_output.push_str(&dna.seq);
-    }
-    kraken_output.push('\n');
-
-    // Also populate our structured “KrakenOutputLine”
-    let status_char = if call != 0 { 'C' } else { 'U' };
+    // Create output line
     let hitlist = if assigned_taxa.is_empty() {
         "0:0".to_string()
     } else {
         hitlist_string(&assigned_taxa, &ambig_list)
     };
-    let seq_opt = if print_sequence_in_kraken {
-        Some(dna.seq.clone())
-    } else {
-        None
-    };
-    let output_line = KrakenOutputLine {
-        status: status_char,
+
+    kraken_output_lines.push(KrakenOutputLine {
+        status: if call != 0 { 'C' } else { 'U' },
         read_id: dna.id.clone(),
         tax_id: call,
-        length: read_len,
+        length: seq_len,
         hitlist,
-        sequence: seq_opt,
-    };
-    kraken_output_structs.push(output_line);
+        sequence: if print_sequence_in_kraken {
+            Some(dna.seq.clone())
+        } else {
+            None
+        },
+    });
 
-    // Return whether classified
     call != 0
 }

@@ -2,10 +2,11 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{Error as IoError, ErrorKind, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Error as IoError, ErrorKind, Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::str;
 use std::sync::Arc;
+use ahash::AHashMap;
 
 /// File type code for Jellyfish/Kraken DBs.
 pub const DATABASE_FILE_TYPE: &str = "JFLISTDN";
@@ -513,4 +514,41 @@ fn read_kmer_bits(bytes: &[u8], key_bits: u64) -> u64 {
 
     let mask = (1u64 << key_bits) - 1;
     val & mask
+}
+
+pub fn read_db_tax_kmer_counts(path: &str) -> Result<AHashMap<u32, u64>, Box<dyn std::error::Error>> {
+    let f = File::open(path)?;
+    let reader = BufReader::new(f);
+
+    let mut result = AHashMap::new();
+    for line in reader.lines() {
+        let line = line?;
+        let parts: Vec<_> = line.trim().split('\t').collect();
+        if parts.len() != 2 {
+            continue; // skip malformed lines
+        }
+        let taxid: u32 = parts[0].parse().unwrap_or(0);
+        let count: u64 = parts[1].parse().unwrap_or(0);
+        if taxid != 0 && count > 0 {
+            result.insert(taxid, count);
+        }
+    }
+    Ok(result)
+}
+
+/// Return `true` if the given raw `kmer` is assigned exactly to `taxid` in the Kraken DB.
+/// For example, if `db.kmer_query(...)` returns `Some(t) == taxid`, we say it "belongs."
+///
+/// If you need to consider ancestor/descendant relationships, you would do more complex logic
+/// (e.g., climb parents to see if `taxid` is an ancestor).
+pub fn kmer_belongs_to_taxon(db: &KrakenDB, raw_kmer: u64, taxid: u32) -> bool {
+    // 1) Convert to canonical form
+    let canon_kmer = db.canonical_representation(raw_kmer);
+
+    // 2) Query the DB
+    if let Some(hit_taxid) = db.kmer_query(canon_kmer) {
+        // 3) Check if exact match
+        return hit_taxid == taxid;
+    }
+    false
 }

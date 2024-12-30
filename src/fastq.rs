@@ -1,18 +1,17 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
+use flate2::read::MultiGzDecoder;
 use crate::classify_sequence::DNASequence;
 
-// Add these new imports:
-use flate2::read::MultiGzDecoder;
-use std::path::Path;
+/// Minimal FASTQ read function that also supports .gz files
+/// Takes a PathBuf instead of &str for better integration with std::path
+pub fn read_fastq_records(path: PathBuf) -> std::io::Result<Vec<DNASequence>> {
+    // Open the file
+    let f = File::open(&path)?;
 
-/// Minimal FASTQ read function that also supports .gz
-pub fn read_fastq_records(path: &str) -> std::io::Result<Vec<DNASequence>> {
-    // Open the file:
-    let f = File::open(path)?;
-
-    // If the file ends with ".gz", wrap it in a MultiGzDecoder
-    let is_gz = Path::new(path)
+    // Check if file is gzipped based on extension
+    let is_gz = path
         .extension()
         .map(|ext| ext == "gz")
         .unwrap_or(false);
@@ -26,7 +25,6 @@ pub fn read_fastq_records(path: &str) -> std::io::Result<Vec<DNASequence>> {
     let mut sequences = Vec::new();
     let mut line = String::new();
 
-    // We'll reuse the same loop logic, but reading from `reader` instead of `br`
     loop {
         line.clear();
         // 1) read header
@@ -44,8 +42,7 @@ pub fn read_fastq_records(path: &str) -> std::io::Result<Vec<DNASequence>> {
         // 2) read sequence
         line.clear();
         if reader.read_line(&mut line)? == 0 {
-            // malformed?
-            break;
+            break; // malformed file
         }
         let seq_str = line.trim_end().to_string();
 
@@ -54,7 +51,7 @@ pub fn read_fastq_records(path: &str) -> std::io::Result<Vec<DNASequence>> {
         if reader.read_line(&mut line)? == 0 {
             break;
         }
-        // 4) read quality
+        // 4) read quality scores
         line.clear();
         if reader.read_line(&mut line)? == 0 {
             break;

@@ -1,6 +1,7 @@
 // src/classification_stats.rs
 
 use ahash::AHashMap;
+use crate::db_counts::{process_taxonomy};
 use crate::types::KrakenReportRow;
 use super::classify_sequence::TaxonCounts;
 use super::taxdb::{ParentMap, NameMap, RankMap};
@@ -8,42 +9,55 @@ use super::taxdb::{ParentMap, NameMap, RankMap};
 /// Per-node stats that store:
 ///   - read counts (self & clade)
 ///   - distinct k-mer counts & total coverage (self & clade)
-///   - optional placeholders for DB-based metrics
+///   - placeholders for DB-based metrics:
+///       * `clade_kmers_db`      = total k-mers in the DB for this clade
+///       * `clade_tax_kmers_db`  = how many of those DB k-mers we actually observed in the reads
+///
+/// Therefore, coverage = clade_tax_kmers_db / clade_kmers_db
 #[derive(Default, Debug, Clone)]
 pub struct NodeStats {
     /// Reads directly assigned to this node
-    pub self_reads: u64,
+    pub self_reads: u32,
     /// Reads in node + descendants
-    pub clade_reads: u64,
+    pub clade_reads: u32,
 
     /// How many **distinct** k-mers in this node alone
     pub self_num_kmers_distinct: usize,
     /// Total coverage for this node's k-mers (sum of counts)
-    pub self_num_kmers_coverage: u64,
+    pub self_num_kmers_coverage: u32,
 
     /// Distinct k-mers in clade (node + descendants)
     pub clade_num_kmers_distinct: usize,
     /// Coverage in clade (node + descendants)
-    pub clade_num_kmers_coverage: u64,
+    pub clade_num_kmers_coverage: u32,
 
-    // Optional placeholders for DB-based metrics
-    pub self_kmers_db: u64,
-    pub clade_kmers_db: u64,
-    pub self_tax_kmers_db: u64,
-    pub clade_tax_kmers_db: u64,
+    // -------------------------
+    // DB-based metrics
+    // -------------------------
+    /// Number of DB k-mers assigned specifically to this node
+    pub self_kmers_db: u32,
+    /// Number of DB k-mers assigned to the entire clade (node + descendants)
+    pub clade_kmers_db: u32,
+    /// Number of node-level k-mers (in DB) we actually found in the reads
+    pub self_tax_kmers_db: u32,
+    /// Number of clade-level k-mers (in DB) we actually found in the reads
+    pub clade_tax_kmers_db: u32,
 }
 
+
 impl NodeStats {
-    /// Return duplication factor for this clade = coverage / distinct.
-    pub fn clade_duplication(&self) -> f64 {
+    /// Return duplication factor for this clade = coverage / distinct in the reads, i.e.
+    /// `(clade_num_kmers_coverage) / (clade_num_kmers_distinct)`.
+    pub fn clade_duplication(&self) -> f32 {
         if self.clade_num_kmers_distinct == 0 {
             0.0
         } else {
-            self.clade_num_kmers_coverage as f64
-                / self.clade_num_kmers_distinct as f64
+            self.clade_num_kmers_coverage as f32
+                / self.clade_num_kmers_distinct as f32
         }
     }
 }
+
 
 /// Build a map of `parent -> Vec<child>` for traversing the taxonomy.
 pub fn build_children_map(parent_map: &ParentMap) -> AHashMap<u32, Vec<u32>> {
@@ -63,52 +77,58 @@ pub fn build_children_map(parent_map: &ParentMap) -> AHashMap<u32, Vec<u32>> {
     children_map
 }
 
-/// Initialize each NodeStats from `TaxonCounts`, using coverage-based approach:
-/// - `self_reads` from `ReadCounts.read_count`
-/// - `self_num_kmers_distinct` = `read_counts.kmer_counts.len()`
-/// - `self_num_kmers_coverage` = sum of values in `kmer_counts`
-pub fn init_node_stats(taxon_counts: &TaxonCounts) -> AHashMap<u32, NodeStats> {
+pub fn init_node_stats(
+    taxon_counts: &TaxonCounts,
+    total_db_counts: &AHashMap<u32, u32>,
+    direct_db_counts: &AHashMap<u32, u32>,
+    parent_map: &ParentMap,
+) -> AHashMap<u32, NodeStats> {
     let mut stats_map = AHashMap::new();
 
-    for (&taxid, read_counts) in taxon_counts {
+    // First, initialize all nodes in the taxonomy with their DB counts
+    for (&taxid, _) in parent_map {
         let mut node_stats = NodeStats::default();
+
+        // Set DB counts even if no reads
+        if let Some(&direct_count) = direct_db_counts.get(&taxid) {
+            node_stats.self_kmers_db = direct_count;
+        }
+        if let Some(&total_count) = total_db_counts.get(&taxid) {
+            node_stats.clade_kmers_db = total_count;
+        }
+
+        stats_map.insert(taxid, node_stats);
+    }
+
+    // Then update nodes that have read counts
+    for (&taxid, read_counts) in taxon_counts {
+        let node_stats = stats_map.entry(taxid).or_default();
+
+        // Read-based stats
+        let distinct = read_counts.kmer_counts.len();
+        let coverage = read_counts.kmer_counts.values().map(|&v| v as u32).sum();
 
         node_stats.self_reads = read_counts.read_count;
         node_stats.clade_reads = read_counts.read_count;
-
-        // Distinct k-mers for this taxon
-        let distinct = read_counts.kmer_counts.len();
-        // Sum coverage
-        let coverage = read_counts
-            .kmer_counts
-            .values()
-            .fold(0u64, |acc, &v| acc + v as u64);
-
         node_stats.self_num_kmers_distinct = distinct;
         node_stats.self_num_kmers_coverage = coverage;
-
-        // Initially, clade == self
         node_stats.clade_num_kmers_distinct = distinct;
         node_stats.clade_num_kmers_coverage = coverage;
 
-        // DB placeholders
-        node_stats.self_kmers_db = 0;
-        node_stats.clade_kmers_db = 0;
-        node_stats.self_tax_kmers_db = 0;
-        node_stats.clade_tax_kmers_db = 0;
-
-        stats_map.insert(taxid, node_stats);
+        // Observed DB k-mers
+        node_stats.self_tax_kmers_db = distinct as u32;
+        node_stats.clade_tax_kmers_db = distinct as u32;
     }
 
     stats_map
 }
 
-/// Recursively sum children’s stats into the parent (reads, distinct kmers, coverage, etc.)
+/// Recursively sum only the read-based statistics (not DB counts which are pre-calculated)
 pub fn accumulate_clade_stats(
     taxid: u32,
     children_map: &AHashMap<u32, Vec<u32>>,
     stats_map: &mut AHashMap<u32, NodeStats>,
-) -> (u64, usize, u64, u64, u64) {
+) -> (u32, usize, u32, u32) {
     // Ensure an entry exists
     if !stats_map.contains_key(&taxid) {
         stats_map.insert(taxid, NodeStats::default());
@@ -119,19 +139,17 @@ pub fn accumulate_clade_stats(
     let mut total_reads = cur.self_reads;
     let mut total_distinct = cur.self_num_kmers_distinct;
     let mut total_coverage = cur.self_num_kmers_coverage;
-    let mut total_db = cur.self_kmers_db;
     let mut total_tax_db = cur.self_tax_kmers_db;
 
     // Recurse children
     if let Some(kids) = children_map.get(&taxid) {
         for &child in kids {
-            let (c_reads, c_distinct, c_cov, c_db, c_tax_db) =
+            let (c_reads, c_distinct, c_cov, c_tax_db) =
                 accumulate_clade_stats(child, children_map, stats_map);
 
             total_reads += c_reads;
             total_distinct += c_distinct;
             total_coverage += c_cov;
-            total_db += c_db;
             total_tax_db += c_tax_db;
         }
     }
@@ -141,13 +159,37 @@ pub fn accumulate_clade_stats(
         node.clade_reads = total_reads;
         node.clade_num_kmers_distinct = total_distinct;
         node.clade_num_kmers_coverage = total_coverage;
-        node.clade_kmers_db = total_db;
         node.clade_tax_kmers_db = total_tax_db;
     }
 
-    (total_reads, total_distinct, total_coverage, total_db, total_tax_db)
+    (total_reads, total_distinct, total_coverage, total_tax_db)
 }
 
+pub fn build_kraken_report(
+    taxon_counts: &TaxonCounts,
+    parent_map: &ParentMap,
+    name_map: Option<&NameMap>,
+    rank_map: Option<&RankMap>,
+    root_taxid: u32,
+    total_reads: u32,
+    taxdb_path: &str,
+    taxdb_counts_path: &str
+) -> (Vec<KrakenReportRow>, String) {
+    let (total_db_counts, direct_db_counts) = process_taxonomy(taxdb_path, taxdb_counts_path).unwrap();
+    let children_map = build_children_map(parent_map);
+    let mut stats_map = init_node_stats(taxon_counts, &total_db_counts, &direct_db_counts, parent_map);
+    accumulate_clade_stats(root_taxid, &children_map, &mut stats_map);
+
+    // Don't skip nodes without reads in generate_kraken_style_report
+    generate_kraken_style_report(
+        root_taxid,
+        &stats_map,
+        &children_map,
+        name_map,
+        rank_map,
+        total_reads,
+    )
+}
 /// Generate a Kraken-style report (both structured rows and text).
 pub fn generate_kraken_style_report(
     root_taxid: u32,
@@ -155,12 +197,13 @@ pub fn generate_kraken_style_report(
     children_map: &AHashMap<u32, Vec<u32>>,
     name_map: Option<&NameMap>,
     rank_map: Option<&RankMap>,
-    total_reads: u64,
+    total_reads: u32,
 ) -> (Vec<KrakenReportRow>, String) {
     let mut report_lines = Vec::new();
     let mut report_text = String::new();
 
     // Minimal header
+    // Note that `cov` = coverage of k-mers in this clade (fraction in DB actually observed).
     report_text.push_str("%\treads\ttaxReads\tkmers\tdup\tcov\ttaxID\trank\ttaxName\n");
 
     fn dfs(
@@ -171,26 +214,28 @@ pub fn generate_kraken_style_report(
         children_map: &AHashMap<u32, Vec<u32>>,
         name_map: Option<&NameMap>,
         rank_map: Option<&RankMap>,
-        total_reads: u64,
+        total_reads: u32,
         report_lines: &mut Vec<KrakenReportRow>,
         report_text: &mut String,
     ) {
         let default_stats = NodeStats::default();
         let stats = stats_map.get(&taxid).unwrap_or(&default_stats);
 
-        if stats.clade_reads == 0 || total_reads == 0 {
+        // If no reads in clade => skip
+        if stats.clade_reads == 0 {
             return;
         }
 
-        let pct = 100.0 * (stats.clade_reads as f64) / (total_reads as f64);
-        // duplication = coverage / distinct
+        // % of reads in entire dataset
+        let pct = 100.0 * (stats.clade_reads as f32) / (total_reads as f32);
         let dup = stats.clade_duplication();
 
-        // coverage = fraction of DB k-mers (if used)
+        // -- coverage = fraction of DB k-mers for this clade that were found in reads --
+        // i.e. clade_tax_kmers_db / clade_kmers_db
         let cov = if stats.clade_kmers_db > 0 {
-            stats.clade_tax_kmers_db as f64 / stats.clade_kmers_db as f64
+            stats.clade_tax_kmers_db as f32 / stats.clade_kmers_db as f32
         } else {
-            0.0
+            0.0 as f32
         };
 
         // Possibly retrieve rank & name
@@ -203,7 +248,7 @@ pub fn generate_kraken_style_report(
             .cloned()
             .unwrap_or_default();
 
-        // Indent name based on depth
+        // Indent name based on tree depth in the final text
         let mut indented_name = String::new();
         for _ in 0..depth {
             indented_name.push('\t');
@@ -217,8 +262,7 @@ pub fn generate_kraken_style_report(
             std::cmp::Reverse(cstats.clade_reads)
         });
 
-        // We’ll store “kmers” in the final report as “clade_num_kmers_distinct”
-        let clade_kmers = stats.clade_num_kmers_distinct as u64;
+        let clade_kmers = stats.clade_num_kmers_distinct as u32;
 
         // Build structured row
         let row = KrakenReportRow {
@@ -241,7 +285,7 @@ pub fn generate_kraken_style_report(
         use std::fmt::Write as _;
         let _ = write!(
             report_text,
-            "{:.4}\t{}\t{}\t{}\t{:.4}\t{:.5}\t{}\t{}\t{}\n",
+            "{:.4}\t{}\t{}\t{}\t{:.4}\t{:.6}\t{}\t{}\t{}\n",
             pct,
             stats.clade_reads,
             stats.self_reads,
@@ -270,6 +314,7 @@ pub fn generate_kraken_style_report(
         }
     }
 
+    // DFS starting at root
     dfs(
         root_taxid,
         None,
@@ -284,30 +329,4 @@ pub fn generate_kraken_style_report(
     );
 
     (report_lines, report_text)
-}
-
-/// The main pipeline to build a Kraken-style report:
-///  1) Build children map
-///  2) init_node_stats
-///  3) accumulate_clade_stats
-///  4) generate_kraken_style_report
-pub fn build_kraken_report(
-    taxon_counts: &TaxonCounts,
-    parent_map: &ParentMap,
-    name_map: Option<&NameMap>,
-    rank_map: Option<&RankMap>,
-    root_taxid: u32,
-    total_reads: u64,
-) -> (Vec<KrakenReportRow>, String) {
-    let children_map = build_children_map(parent_map);
-    let mut stats_map = init_node_stats(taxon_counts);
-    accumulate_clade_stats(root_taxid, &children_map, &mut stats_map);
-    generate_kraken_style_report(
-        root_taxid,
-        &stats_map,
-        &children_map,
-        name_map,
-        rank_map,
-        total_reads,
-    )
 }

@@ -1,6 +1,6 @@
 [package]
 name = "krakenuniq-rs"
-version = "0.0.1-alpha.5"
+version = "0.0.1"
 edition = "2021"
 description = "A rust port of krakenuniq"
 license = "MIT"
@@ -12,3 +12,9 @@ rayon = "1.7"        # for parallel read processing if you want
 thiserror = "2.0.9"
 flate2 = "1.0.35"  # for stable benchmarking
 ahash = "0.8.11"
+indicatif = "0.17.9"
+parking_lot = "0.12.3"
+
+[lib]
+path = "src/lib.rs"
+name = "krakenuniq-rs"

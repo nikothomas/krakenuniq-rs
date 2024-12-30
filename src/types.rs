@@ -3,12 +3,12 @@
 ///  %  reads  taxReads  kmers  taxKmers  kmersDB  taxKmersDB  dup  cov  taxID  rank  taxName
 #[derive(Debug, Clone)]
 pub struct KrakenReportRow {
-    pub pct: f64,
-    pub reads: u64,
-    pub tax_reads: u64,
-    pub kmers: u64,
-    pub dup: f64,
-    pub cov: f64,
+    pub pct: f32,
+    pub reads: u32,
+    pub tax_reads: u32,
+    pub kmers: u32,
+    pub dup: f32,
+    pub cov: f32,
     pub tax_id: u32,
     pub rank: String,
     pub tax_name: String,
