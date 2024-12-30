@@ -197,7 +197,7 @@ pub fn generate_kraken_style_report(
             tax_kmers_db: stats.self_kmers_db,
             dup,
             cov,
-            tax_id,
+            tax_id: taxid.clone(),
             rank: rank_str.clone(),
             tax_name: raw_name.clone(),
             depth,
