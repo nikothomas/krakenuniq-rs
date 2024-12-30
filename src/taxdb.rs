@@ -1,13 +1,13 @@
 //src/taxdb.rs
 
-use std::collections::HashMap;
+use ahash::AHashMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 
-pub type ParentMap = HashMap<u32, u32>;
-pub type NameMap = HashMap<u32, String>;
-pub type RankMap = HashMap<u32, String>;
+pub type ParentMap = AHashMap<u32, u32>;
+pub type NameMap = AHashMap<u32, String>;
+pub type RankMap = AHashMap<u32, String>;
 
 /// Parses a taxDB file in the format:
 /// ```text
@@ -23,9 +23,9 @@ pub fn parse_taxdb<P: AsRef<Path>>(
     let file = File::open(filepath)?;
     let reader = BufReader::new(file);
 
-    let mut parent_map: ParentMap = HashMap::new();
-    let mut name_map: NameMap = HashMap::new();
-    let mut rank_map: RankMap = HashMap::new();
+    let mut parent_map: ParentMap = AHashMap::new();
+    let mut name_map: NameMap = AHashMap::new();
+    let mut rank_map: RankMap = AHashMap::new();
 
     for line_result in reader.lines() {
         let line = line_result?;

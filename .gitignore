@@ -4,3 +4,8 @@
 /reads.fastq
 /database.idx
 /pr2/
+/classified_reads.fq
+/kraken_output.txt
+/kraken_report.txt
+/taxon_counts.csv
+/unclassified_reads.fq

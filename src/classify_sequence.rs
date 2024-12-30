@@ -1,6 +1,7 @@
 //src/classify.rs
 
-use std::collections::{HashMap, HashSet, BTreeSet};
+use std::collections::BTreeSet;
+use ahash::{AHashMap, AHashSet};
 use std::fmt::Write;
 use crate::krakendb::KrakenDB;
 use crate::types::{KrakenOutputLine};
@@ -9,7 +10,7 @@ use crate::types::{KrakenOutputLine};
 // -----------------------
 
 /// A parent map: taxon -> parent taxon. For example, parent_map[9606] = 9605, etc.
-pub type ParentMap = HashMap<u32, u32>;
+pub type ParentMap = AHashMap<u32, u32>;
 
 /// Return the lowest common ancestor of 'a' and 'b'.
 /// LCA(0, x) = x, LCA(x, 0) = x. If we can't find anything else, return 1 (root).
@@ -20,7 +21,7 @@ pub fn lca(parent_map: &ParentMap, mut a: u32, mut b: u32) -> u32 {
     }
 
     // Collect all ancestors of a (including a)
-    let mut a_anc = HashSet::new();
+    let mut a_anc = AHashSet::new();
     while a > 1 {
         a_anc.insert(a);
         // move 'a' to its parent
@@ -70,7 +71,7 @@ fn break_ties(max_taxa: BTreeSet<u32>, parent_map: &ParentMap) -> u32 {
 ///   - Keep track of the max score and the taxon that gave that max.
 ///   - If multiple taxa tie, compute LCA among them.
 pub fn resolve_tree_kraken(
-    hit_counts: &HashMap<u32, u32>,
+    hit_counts: &AHashMap<u32, u32>,
     parent_map: &ParentMap
 ) -> u32 {
     let mut max_taxa = BTreeSet::new();
@@ -137,7 +138,7 @@ pub struct DNASequence {
 #[derive(Default, Debug)]
 pub struct ReadCounts {
     pub read_count: u64,
-    pub unique_kmers: HashSet<u64>,
+    pub unique_kmers: AHashSet<u64>,
 }
 
 impl ReadCounts {
@@ -149,7 +150,7 @@ impl ReadCounts {
     }
 }
 
-pub type TaxonCounts = HashMap<u32, ReadCounts>;
+pub type TaxonCounts = AHashMap<u32, ReadCounts>;
 
 /// Convert a list of per-base assigned taxa + an "ambiguous" flag
 /// into something like "2:10 0:5 ..." or "A:3" for ambiguous spans.
@@ -266,7 +267,7 @@ pub fn classify_sequence(
 
     // This is the table of "how many k-mer hits belong to each taxon"
     // including ancestors
-    let mut hit_counts: HashMap<u32, u32> = HashMap::new();
+    let mut hit_counts: AHashMap<u32, u32> = AHashMap::new();
 
     for start in 0..span_count {
         let (encoded, is_valid) = encode_kmer_2bit_slice(&seq_bytes[start..start + k]);

@@ -1,6 +1,6 @@
 // src/classification_stats.rs
 
-use std::collections::HashMap;
+use ahash::AHashMap;
 use crate::types::KrakenReportRow;
 use super::classify_sequence::{TaxonCounts};
 use super::taxdb::{ParentMap, NameMap, RankMap};
@@ -30,8 +30,8 @@ pub struct NodeStats {
 
 /// Build a map of parent -> Vec<child> from the existing child->parent `parent_map`.
 /// This helps us traverse the taxonomy tree from the root(s) downward.
-pub fn build_children_map(parent_map: &ParentMap) -> HashMap<u32, Vec<u32>> {
-    let mut children_map: HashMap<u32, Vec<u32>> = HashMap::new();
+pub fn build_children_map(parent_map: &ParentMap) -> AHashMap<u32, Vec<u32>> {
+    let mut children_map: AHashMap<u32, Vec<u32>> = AHashMap::new();
 
     // Initialize every known taxid as a key to avoid missing entries
     for &taxid in parent_map.keys() {
@@ -55,8 +55,8 @@ pub fn build_children_map(parent_map: &ParentMap) -> HashMap<u32, Vec<u32>> {
 ///
 /// For the “DB” fields (`_kmers_db`), this example initializes them to 0;
 /// if you have logic to populate them, add it here.
-pub fn init_node_stats(taxon_counts: &TaxonCounts) -> HashMap<u32, NodeStats> {
-    let mut stats_map: HashMap<u32, NodeStats> = HashMap::new();
+pub fn init_node_stats(taxon_counts: &TaxonCounts) -> AHashMap<u32, NodeStats> {
+    let mut stats_map: AHashMap<u32, NodeStats> = AHashMap::new();
 
     for (&taxid, rc) in taxon_counts {
         let mut node_stats = NodeStats::default();
@@ -81,8 +81,8 @@ pub fn init_node_stats(taxon_counts: &TaxonCounts) -> HashMap<u32, NodeStats> {
 /// and the DB fields (`clade_kmers_db`, etc.) if used.
 pub fn accumulate_clade_stats(
     taxid: u32,
-    children_map: &HashMap<u32, Vec<u32>>,
-    stats_map: &mut HashMap<u32, NodeStats>,
+    children_map: &AHashMap<u32, Vec<u32>>,
+    stats_map: &mut AHashMap<u32, NodeStats>,
 ) -> (u64, usize, u64, u64) {
     if !stats_map.contains_key(&taxid) {
         stats_map.insert(taxid, NodeStats::default());
@@ -118,8 +118,8 @@ pub fn accumulate_clade_stats(
 
 pub fn generate_kraken_style_report(
     root_taxid: u32,
-    stats_map: &HashMap<u32, NodeStats>,
-    children_map: &HashMap<u32, Vec<u32>>,
+    stats_map: &AHashMap<u32, NodeStats>,
+    children_map: &AHashMap<u32, Vec<u32>>,
     name_map: Option<&NameMap>,
     rank_map: Option<&RankMap>,
     total_reads: u64,
@@ -132,11 +132,13 @@ pub fn generate_kraken_style_report(
         "%\treads\ttaxReads\tkmers\ttaxKmers\tkmersDB\ttaxKmersDB\tdup\tcov\ttaxID\trank\ttaxName\n"
     );
 
+    // Modified DFS to include `parent_taxid`
     fn dfs(
         taxid: u32,
+        parent_taxid: Option<u32>,        // <--- new
         depth: usize,
-        stats_map: &HashMap<u32, NodeStats>,
-        children_map: &HashMap<u32, Vec<u32>>,
+        stats_map: &AHashMap<u32, NodeStats>,
+        children_map: &AHashMap<u32, Vec<u32>>,
         name_map: Option<&NameMap>,
         rank_map: Option<&RankMap>,
         total_reads: u64,
@@ -144,7 +146,9 @@ pub fn generate_kraken_style_report(
         report_text: &mut String,
     ) {
         let node_stats_default = &NodeStats::default();
-        let stats = stats_map.get(&taxid).unwrap_or(&node_stats_default);
+        let stats = stats_map.get(&taxid).unwrap_or(node_stats_default);
+
+        // If no reads, skip printing
         if stats.clade_reads == 0 || total_reads == 0 {
             return;
         }
@@ -157,6 +161,7 @@ pub fn generate_kraken_style_report(
         };
         let cov = (stats.clade_kmers as f64) / 10_000.0;
 
+        // get rank & name if available
         let rank_str = rank_map
             .and_then(|rm| rm.get(&taxid))
             .cloned()
@@ -166,14 +171,22 @@ pub fn generate_kraken_style_report(
             .cloned()
             .unwrap_or_default();
 
-        // Indent with tabs
+        // Indent name in text
         let mut indented_name = String::new();
         for _ in 0..depth {
             indented_name.push('\t');
         }
         indented_name.push_str(&raw_name);
 
-        // ----- Build structured row
+        // Gather child tax IDs:
+        let mut kids = children_map.get(&taxid).cloned().unwrap_or_default();
+        // Sort children (optional: by read count descending)
+        kids.sort_by_key(|child_id| {
+            let cstats = stats_map.get(child_id).unwrap_or(node_stats_default);
+            std::cmp::Reverse(cstats.clade_reads) // bigger first
+        });
+
+        // Build the structured row
         let row = KrakenReportRow {
             pct,
             reads: total_reads,
@@ -184,14 +197,18 @@ pub fn generate_kraken_style_report(
             tax_kmers_db: stats.self_kmers_db,
             dup,
             cov,
-            tax_id: taxid,
+            tax_id,
             rank: rank_str.clone(),
             tax_name: raw_name.clone(),
             depth,
+
+            // New fields
+            parent_tax_id: parent_taxid,
+            children_tax_ids: kids.clone(),
         };
         report_lines.push(row);
 
-        // ----- Build the text line
+        // Build the text line (does not show parent or child IDs)
         use std::fmt::Write as FmtWrite;
         let _ = write!(
             report_text,
@@ -210,24 +227,40 @@ pub fn generate_kraken_style_report(
             indented_name
         );
 
-        // Descend into children
-        let mut kids = children_map
-            .get(&taxid)
-            .cloned()
-            .unwrap_or_default();
-        kids.sort_by_key(|child_id| std::cmp::Reverse(stats_map.get(child_id).map_or(0, |c| c.clade_reads)));
-
+        // Now recurse over children
         for child_id in kids {
-            dfs(child_id, depth + 1, stats_map, children_map, name_map, rank_map,
-                total_reads, report_lines, report_text);
+            dfs(
+                child_id,
+                Some(taxid),                // <--- pass current node as parent
+                depth + 1,
+                stats_map,
+                children_map,
+                name_map,
+                rank_map,
+                total_reads,
+                report_lines,
+                report_text,
+            );
         }
     }
 
-    // Start DFS
-    dfs(root_taxid, 0, stats_map, children_map, name_map, rank_map, total_reads, &mut report_lines, &mut report_text);
+    // Kick off DFS from the root with no parent
+    dfs(
+        root_taxid,
+        None, // root has no parent
+        0,
+        stats_map,
+        children_map,
+        name_map,
+        rank_map,
+        total_reads,
+        &mut report_lines,
+        &mut report_text,
+    );
 
     (report_lines, report_text)
 }
+
 
 pub fn build_kraken_report(
     taxon_counts: &TaxonCounts,

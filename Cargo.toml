@@ -9,4 +9,6 @@ repository = "https://github.com/nikothomas/krakenuniq-rs"
 [dependencies]
 log = "0.4"
 rayon = "1.7"        # for parallel read processing if you want
-thiserror = "2.0.9"  # for stable benchmarking
+thiserror = "2.0.9"
+flate2 = "1.0.35"  # for stable benchmarking
+ahash = "0.8.11"

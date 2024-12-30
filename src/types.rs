@@ -16,6 +16,8 @@ pub struct KrakenReportRow {
     pub rank: String,
     pub tax_name: String,
     pub depth: usize,
+    pub parent_tax_id: Option<u32>,
+    pub children_tax_ids: Vec<u32>,
 }
 
 /// A structured representation of one Kraken output line.
