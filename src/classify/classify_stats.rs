@@ -1,10 +1,9 @@
-// src/classification_stats.rs
+// src/classify/classify_stats.rs
 
 use ahash::AHashMap;
-use crate::db_counts::{process_taxonomy};
 use crate::types::KrakenReportRow;
 use super::classify_sequence::TaxonCounts;
-use super::taxdb::{ParentMap, NameMap, RankMap};
+use super::{ParentMap, NameMap, RankMap};
 
 /// Per-node stats that store:
 ///   - read counts (self & clade)
@@ -165,6 +164,8 @@ pub fn accumulate_clade_stats(
     (total_reads, total_distinct, total_coverage, total_tax_db)
 }
 
+/// Build a Kraken-style report, but we no longer re-read the DB counts:
+/// instead, we take `&total_db_counts` and `&direct_db_counts` from the caller.
 pub fn build_kraken_report(
     taxon_counts: &TaxonCounts,
     parent_map: &ParentMap,
@@ -172,15 +173,25 @@ pub fn build_kraken_report(
     rank_map: Option<&RankMap>,
     root_taxid: u32,
     total_reads: u32,
-    taxdb_path: &str,
-    taxdb_counts_path: &str
+    // <-- Added these two:
+    total_db_counts: &AHashMap<u32, u32>,
+    direct_db_counts: &AHashMap<u32, u32>,
 ) -> (Vec<KrakenReportRow>, String) {
-    let (total_db_counts, direct_db_counts) = process_taxonomy(taxdb_path, taxdb_counts_path).unwrap();
+    // Build children map once
     let children_map = build_children_map(parent_map);
-    let mut stats_map = init_node_stats(taxon_counts, &total_db_counts, &direct_db_counts, parent_map);
+
+    // Use total_db_counts, direct_db_counts from the caller
+    let mut stats_map = init_node_stats(
+        taxon_counts,
+        total_db_counts,
+        direct_db_counts,
+        parent_map,
+    );
+
+    // Accumulate child data
     accumulate_clade_stats(root_taxid, &children_map, &mut stats_map);
 
-    // Don't skip nodes without reads in generate_kraken_style_report
+    // Generate final structured rows & text
     generate_kraken_style_report(
         root_taxid,
         &stats_map,
@@ -190,6 +201,7 @@ pub fn build_kraken_report(
         total_reads,
     )
 }
+
 /// Generate a Kraken-style report (both structured rows and text).
 pub fn generate_kraken_style_report(
     root_taxid: u32,
@@ -222,7 +234,7 @@ pub fn generate_kraken_style_report(
         let stats = stats_map.get(&taxid).unwrap_or(&default_stats);
 
         // If no reads in clade => skip
-        if stats.clade_reads == 0 {
+        if stats.clade_reads == 0 && stats.self_reads == 0 {
             return;
         }
 

@@ -1,3 +1,5 @@
+//src/types.rs
+
 /// A structured representation of one row in the Kraken taxonomy report.
 /// For example:
 ///  %  reads  taxReads  kmers  taxKmers  kmersDB  taxKmersDB  dup  cov  taxID  rank  taxName
@@ -26,4 +28,13 @@ pub struct KrakenOutputLine {
     pub length: usize,
     pub hitlist: String,
     pub sequence: Option<String>, // if you store the read's sequence
+}
+
+/// A minimal representation of a read.
+#[derive(Debug, Clone)]
+pub struct DNASequence {
+    pub id: String,
+    pub header_line: String,
+    pub seq: String,
+    pub quals: String,
 }

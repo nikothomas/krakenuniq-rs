@@ -9,3 +9,6 @@
 /kraken_report.txt
 /taxon_counts.csv
 /unclassified_reads.fq
+/classifyExact
+/bench_report.txt
+/barcode03/

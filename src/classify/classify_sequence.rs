@@ -3,8 +3,10 @@
 use std::collections::BTreeSet;
 use ahash::{AHashMap, AHashSet};
 use std::fmt::Write;
+use std::sync::Arc;
 use crate::krakendb::KrakenDB;
-use crate::types::KrakenOutputLine;
+use crate::types::{DNASequence, KrakenOutputLine};
+use rayon::prelude::*; // <-- Add Rayon
 
 /// A parent map: taxon -> parent taxon (e.g. parent_map[9606] = 9605).
 pub type ParentMap = AHashMap<u32, u32>;
@@ -42,7 +44,7 @@ pub fn lca(parent_map: &ParentMap, mut a: u32, mut b: u32) -> u32 {
     1
 }
 
-/// If multiple taxa tie for best “score,” break ties by LCA.
+/// If multiple taxa tie for best "score," break ties by LCA.
 fn break_ties(max_taxa: BTreeSet<u32>, parent_map: &ParentMap) -> u32 {
     if max_taxa.is_empty() {
         return 0;
@@ -89,6 +91,7 @@ pub fn resolve_tree_kraken(
             max_taxon = taxon;
             max_taxa.clear();
         } else if score == max_score {
+            // We have a tie => track both in max_taxa
             if max_taxa.is_empty() {
                 max_taxa.insert(max_taxon);
             }
@@ -105,16 +108,7 @@ pub fn resolve_tree_kraken(
     max_taxon
 }
 
-/// A minimal representation of a read.
-#[derive(Debug, Clone)]
-pub struct DNASequence {
-    pub id: String,
-    pub header_line: String,
-    pub seq: String,
-    pub quals: String,
-}
-
-/// We now store each k-mer’s coverage in `kmer_counts`.
+/// We store each k-mer’s coverage in `kmer_counts`.
 #[derive(Default, Debug, Clone)]
 pub struct ReadCounts {
     pub read_count: u32,
@@ -144,10 +138,10 @@ impl ReadCounts {
     }
 }
 
-/// A type alias for “taxon => read+kmers info.”
+/// A type alias for "taxon => read+kmers info."
 pub type TaxonCounts = AHashMap<u32, ReadCounts>;
 
-/// Build a string like “2:10 0:5 ...” from the per-base assigned taxa + ambig flags.
+/// Build a string like "2:10 0:5 ..." from the per-base assigned taxa + ambig flags.
 fn hitlist_string(taxa: &[u32], ambig: &[bool]) -> String {
     let mut out = String::new();
     if taxa.is_empty() {
@@ -171,7 +165,7 @@ fn hitlist_string(taxa: &[u32], ambig: &[bool]) -> String {
             last_code = code;
         }
     }
-    // Flush final run
+    // Flush the final run
     if last_code >= 0 {
         let _ = write!(out, "{}:{}", last_code, code_count);
     } else {
@@ -192,16 +186,17 @@ fn encode_kmer_2bit_slice(seq_bytes: &[u8]) -> (u64, bool) {
             b'C' | b'c' => { val |= 1; }
             b'G' | b'g' => { val |= 2; }
             b'T' | b't' => { val |= 3; }
-            _ => return (0, false), // “N” or invalid base => invalid
+            _ => return (0, false), // "N" or invalid base => invalid
         }
     }
     (val, true)
 }
 
-/// Modified to return classification status and avoid string building
+/// Parallelized version of classify_sequence, using Rayon at the k-mer level.
+/// If you'd rather parallelize over reads, move the parallel logic outside this function.
 pub fn classify_sequence(
     dna: &DNASequence,
-    kraken_dbs: &[KrakenDB],
+    kraken_dbs: &[Arc<KrakenDB>],
     parent_map: &ParentMap,
     taxon_counts: &mut TaxonCounts,
     print_sequence_in_kraken: bool,
@@ -237,41 +232,95 @@ pub fn classify_sequence(
 
     let span_count = seq_len.saturating_sub(k) + 1;
     let seq_bytes = dna.seq.as_bytes();
-    let mut assigned_taxa = Vec::with_capacity(span_count);
-    let mut ambig_list = Vec::with_capacity(span_count);
+
+    // ----------------------------------------------------------------
+    // 1) Parallel: process each k-mer
+    //    We'll store partial results in (assigned_taxon, is_ambig, local_hits).
+    // ----------------------------------------------------------------
+    let (assigned_info, local_maps): (Vec<_>, Vec<_>) =
+        (0..span_count)
+            .into_par_iter()
+            .map(|start| {
+                let (encoded, is_valid) = encode_kmer_2bit_slice(&seq_bytes[start..start + k]);
+                if !is_valid {
+                    // Return "unassigned" plus no hits
+                    return (
+                        (start, 0u32, true), // assigned_taxon=0, is_ambig=true
+                        AHashMap::new(),     // local AHashMap<taxid, Vec<kmer>>
+                    );
+                }
+
+                // Check each DB
+                let mut found_taxon = 0;
+                let mut canon_kmer = 0;
+                for db in kraken_dbs {
+                    canon_kmer = db.canonical_representation(encoded);
+                    if let Some(tid) = db.kmer_query(canon_kmer) {
+                        found_taxon = tid;
+                        break;
+                    }
+                }
+
+                if found_taxon == 0 {
+                    // No match => assigned_taxon=0
+                    return ((start, 0u32, false), AHashMap::new());
+                }
+
+                // Found a taxon => store kmer in a local map
+                let mut local_hits: AHashMap<u32, Vec<u64>> = AHashMap::default();
+                local_hits.insert(found_taxon, vec![canon_kmer]);
+
+                ((start, found_taxon, false), local_hits)
+            })
+            // fold partial results
+            .fold(
+                || (Vec::new(), Vec::new()),
+                |mut acc, (info, local_map)| {
+                    acc.0.push(info);
+                    acc.1.push(local_map);
+                    acc
+                },
+            )
+            // reduce across threads
+            .reduce(
+                || (Vec::new(), Vec::new()),
+                |(mut assigned_a, mut local_a), (mut assigned_b, mut local_b)| {
+                    assigned_a.append(&mut assigned_b);
+                    local_a.append(&mut local_b);
+                    (assigned_a, local_a)
+                },
+            );
+
+    // ----------------------------------------------------------------
+    // 2) Reconstruct assigned_taxa + ambig_list in correct order
+    // ----------------------------------------------------------------
+    let mut assigned_taxa = vec![0u32; span_count];
+    let mut ambig_list = vec![false; span_count];
+    for (idx, taxon, is_ambig) in assigned_info {
+        assigned_taxa[idx] = taxon;
+        ambig_list[idx] = is_ambig;
+    }
+
+    // ----------------------------------------------------------------
+    // 3) Merge local_maps into a single hit_counts and also into global taxon_counts
+    // ----------------------------------------------------------------
     let mut hit_counts: AHashMap<u32, u32> = AHashMap::new();
+    for lm in local_maps {
+        for (taxid, kmer_list) in lm {
+            // Bump the raw count
+            *hit_counts.entry(taxid).or_insert(0) += 1;
 
-    // Process each k-mer
-    for start in 0..span_count {
-        let (encoded, is_valid) = encode_kmer_2bit_slice(&seq_bytes[start..start + k]);
-        if !is_valid {
-            assigned_taxa.push(0);
-            ambig_list.push(true);
-            continue;
-        }
-        ambig_list.push(false);
-
-        // Check each DB
-        let mut found_taxon = 0;
-        let mut canon_kmer = 0;
-        for db in kraken_dbs {
-            canon_kmer = db.canonical_representation(encoded);
-            if let Some(tid) = db.kmer_query(canon_kmer) {
-                found_taxon = tid;
-                break;
+            // Also store k-mers in the shared taxon_counts
+            let entry = taxon_counts.entry(taxid).or_default();
+            for k in kmer_list {
+                entry.add_kmer_occurrence(k);
             }
-        }
-
-        assigned_taxa.push(found_taxon);
-
-        if found_taxon != 0 {
-            *hit_counts.entry(found_taxon).or_insert(0) += 1;
-            let entry = taxon_counts.entry(found_taxon).or_default();
-            entry.add_kmer_occurrence(canon_kmer);
         }
     }
 
-    // Classify using the hit counts
+    // ----------------------------------------------------------------
+    // 4) Classify using the hit_counts => final assigned taxid
+    // ----------------------------------------------------------------
     let call = resolve_tree_kraken(&hit_counts, parent_map);
 
     // Update taxon counts for the final call
@@ -284,13 +333,18 @@ pub fn classify_sequence(
         return false;
     }
 
-    // Create output line
+    // ----------------------------------------------------------------
+    // 5) Build the final "hitlist" string for output
+    // ----------------------------------------------------------------
     let hitlist = if assigned_taxa.is_empty() {
         "0:0".to_string()
     } else {
         hitlist_string(&assigned_taxa, &ambig_list)
     };
 
+    // ----------------------------------------------------------------
+    // 6) Append to kraken_output_lines
+    // ----------------------------------------------------------------
     kraken_output_lines.push(KrakenOutputLine {
         status: if call != 0 { 'C' } else { 'U' },
         read_id: dna.id.clone(),

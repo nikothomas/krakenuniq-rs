@@ -1,8 +1,10 @@
+//src/fastq.rs
+
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use flate2::read::MultiGzDecoder;
-use crate::classify_sequence::DNASequence;
+use crate::DNASequence;
 
 /// Minimal FASTQ read function that also supports .gz files
 /// Takes a PathBuf instead of &str for better integration with std::path
