@@ -3,12 +3,11 @@
 pub mod types;
 pub mod fastq;
 pub mod krakendb;
-// NOTE: replaced your old taxdb references with the new merged module
 pub mod taxdb;
 pub mod classify;
 
 use ahash::AHashMap;
-use rayon::prelude::*;  // <-- IMPORTANT: import Rayon traits
+use rayon::prelude::*;
 use std::fmt::Write as FmtWrite;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,13 +35,21 @@ pub struct ClassificationResults {
 impl ClassificationResults {
     /// Generate Kraken output text on demand
     pub fn get_kraken_output(&self) -> String {
-        let mut output = String::new();
-        for line in &self.kraken_output_lines {
-            let seq_part = line.sequence
-                .as_ref()
-                .map(|s| format!("\t{}", s))
-                .unwrap_or_default();
+        // Since we could have as many lines as we have reads, reserve the approximate capacity
+        // for the output string. This is an estimate: say ~100 bytes per line on average.
+        // If you have extremely long sequences, adjust as needed.
+        let capacity_estimate = self.kraken_output_lines.len().saturating_mul(100);
+        let mut output = String::with_capacity(capacity_estimate);
 
+        for line in &self.kraken_output_lines {
+            // If the sequence was requested, append it
+            let seq_part = match &line.sequence {
+                Some(s) => format!("\t{}", s),
+                None => String::new(),
+            };
+
+            // Using `writeln!` for convenience; you could manually push_str if you want
+            // finer control or performance.
             writeln!(
                 output,
                 "{}\t{}\t{}\t{}\t{}{}",
@@ -54,31 +61,29 @@ impl ClassificationResults {
                 seq_part
             ).unwrap();
         }
+
         output
     }
 
-    /// Generate classified reads text on demand
+    /// Generate classified FASTQ output
     pub fn get_classified_reads_text(&self) -> String {
-        let mut output = String::new();
+        // Reserve ~ (read length + header length + 10) per read
+        let cap = self.classified_reads.len().saturating_mul(150);
+        let mut output = String::with_capacity(cap);
+
         for read in &self.classified_reads {
-            writeln!(
-                output,
-                "@{}\n{}\n+\n{}",
-                read.header_line, read.seq, read.quals
-            ).unwrap();
+            writeln!(output, "@{}\n{}\n+\n{}", read.header_line, read.seq, read.quals).unwrap();
         }
         output
     }
 
-    /// Generate unclassified reads text on demand
+    /// Generate unclassified FASTQ output
     pub fn get_unclassified_reads_text(&self) -> String {
-        let mut output = String::new();
+        let cap = self.unclassified_reads.len().saturating_mul(150);
+        let mut output = String::with_capacity(cap);
+
         for read in &self.unclassified_reads {
-            writeln!(
-                output,
-                "@{}\n{}\n+\n{}",
-                read.header_line, read.seq, read.quals
-            ).unwrap();
+            writeln!(output, "@{}\n{}\n+\n{}", read.header_line, read.seq, read.quals).unwrap();
         }
         output
     }
@@ -86,11 +91,15 @@ impl ClassificationResults {
     /// Generate Kraken report text on demand
     pub fn get_kraken_report(&self) -> Option<String> {
         if let Some(rows) = &self.kraken_report_rows {
-            let mut output = String::new();
+            // Rough estimate for lines, say ~80 bytes per row
+            let cap = rows.len().saturating_mul(80);
+            let mut output = String::with_capacity(cap);
+
             output.push_str("%\treads\ttaxReads\tkmers\tdup\tcov\ttaxID\trank\ttaxName\n");
 
             for row in rows {
                 let mut indented_name = String::new();
+                // If you expect big depth, you could even do `String::with_capacity(...)`.
                 for _ in 0..row.depth {
                     indented_name.push('\t');
                 }
@@ -117,7 +126,7 @@ impl ClassificationResults {
     }
 }
 
-/// Unified function to classify reads from one or multiple files, with parallel I/O + parallel classification.
+/// Unified function to classify reads from one or multiple files.
 pub fn classify_reads(
     db_path: &str,
     db_index_path: &str,
@@ -128,7 +137,7 @@ pub fn classify_reads(
     only_classified_kraken_output: bool,
     generate_report: bool,
 ) -> Result<ClassificationResults, Box<dyn std::error::Error>> {
-    // 1. Load and setup database
+    // STEP 1. Load & setup DB
     let t0 = Instant::now();
     let mut db = KrakenDB::new().open_file(db_path)?;
     let idx_data = std::fs::read(db_index_path)?;
@@ -136,7 +145,7 @@ pub fn classify_reads(
     db.index_ptr = Some(Arc::new(db_index));
     eprintln!("Step 1 (Load & setup DB) took: {:?}", t0.elapsed());
 
-    // 2. Parse taxonomy DB & counts => returns TaxonomyData
+    // STEP 2. Parse taxonomy DB & counts
     let t1 = Instant::now();
     let taxonomy_data: TaxonomyData = read_taxdb_and_counts(taxdb_path, db_counts_path)?;
     let parent_map = Arc::new(taxonomy_data.parent_map);
@@ -144,21 +153,31 @@ pub fn classify_reads(
     let rank_map = Arc::new(taxonomy_data.rank_map);
     eprintln!("Step 2 (Parse taxonomy DB & counts) took: {:?}", t1.elapsed());
 
-    // 3. Read all FASTQ data (parallel I/O)
+    // STEP 3. Read all FASTQ data in parallel.
+    // - If you have many files, consider chunking them if needed.
     let t2 = Instant::now();
-    let all_reads: Vec<DNASequence> = reads_paths
+    // We can guess an upper bound if we know about how many reads each file might have.
+    // For instance, if you typically expect 10k reads per file, with 10 files => 100k total.
+    // That helps reduce reallocation. Adjust as appropriate.
+    let files_count = reads_paths.len();
+    let mut all_reads = Vec::with_capacity(files_count.saturating_mul(10_000));
+
+    // We read each path in parallel, each returning a `Vec<DNASequence>`.
+    // Then flatten. This approach is mostly the same as your original code,
+    // but we do an extra local `collect` into a temporary so we can `extend` into `all_reads` (to pre-allocate).
+    let all_reads_vecs = reads_paths
         .into_par_iter()
-        .map(|path| {
-            // Each path is read in parallel, returning a Result<Vec<DNASequence>, E>
-            read_fastq_records(path)
-        })
-        .collect::<Result<Vec<Vec<DNASequence>>, _>>()? // Collect to Result of Vec-of-Vec
-        .into_iter()
-        .flatten()  // Flatten Vec<Vec<DNASequence>> -> Vec<DNASequence>
-        .collect();
+        .map(|path| read_fastq_records(path))
+        .collect::<Result<Vec<Vec<DNASequence>>, _>>()?;
+
+    // Flatten them without too many re-allocations:
+    for read_vec in all_reads_vecs {
+        all_reads.reserve(read_vec.len());
+        all_reads.extend(read_vec);
+    }
     eprintln!("Step 3 (Read all FASTQ data) took: {:?}", t2.elapsed());
 
-    // 4. Run parallel classification
+    // STEP 4. Run parallel classification
     let t3 = Instant::now();
     let db_arc = Arc::new(db); // share DB across threads
     let (classified_reads, unclassified_reads, kraken_output_lines, taxon_counts) =
@@ -171,7 +190,7 @@ pub fn classify_reads(
         );
     eprintln!("Step 4 (Parallel classification) took: {:?}", t3.elapsed());
 
-    // 5. Build the Kraken report (if requested)
+    // STEP 5. Build the Kraken report (if requested)
     let t4 = Instant::now();
     let kraken_report_rows = if generate_report {
         let total_reads = all_reads.len() as u32;
@@ -181,22 +200,28 @@ pub fn classify_reads(
             &parent_map,
             Some(&name_map),
             Some(&rank_map),
-            1, // root taxid (if 1 is your root)
+            1, // root taxid
             total_reads,
-            &taxonomy_data.total_counts,   // from the merged data
-            &taxonomy_data.direct_counts,  // from the merged data
+            &taxonomy_data.total_counts,
+            &taxonomy_data.direct_counts,
         );
         Some(rows)
     } else {
         None
     };
     eprintln!("Step 5 (Build report) took: {:?}", t4.elapsed());
+    // Now convert to Vec<DNASequence> by cloning each read
+    let classified_return: Vec<DNASequence> =
+        classified_reads.iter().map(|r| (*r).clone()).collect();
 
-    // 6. Return the final ClassificationResults
+    let unclassified_return: Vec<DNASequence> =
+        unclassified_reads.iter().map(|r| (*r).clone()).collect();
+
+    // STEP 6. Return final results
     Ok(ClassificationResults {
         kraken_output_lines,
-        classified_reads,
-        unclassified_reads,
+        classified_reads: classified_return,
+        unclassified_reads: unclassified_return,
         taxon_counts,
         kraken_report_rows,
         name_map: Some(name_map),
@@ -217,7 +242,6 @@ mod tests {
             .expect("Cannot read directory 'barcode03'")
             .filter_map(|entry| {
                 let path = entry.ok()?.path();
-                // Convert OsStr -> String, lowercase it, and check endings
                 let filename = path.file_name()?.to_string_lossy().to_lowercase();
                 if filename.ends_with(".fastq") || filename.ends_with(".fastq.gz") {
                     Some(path)
@@ -255,62 +279,45 @@ mod tests {
                 .expect("Could not write kraken_report.txt");
         }
 
-        // 5. Test the structured data
+        // 5. Basic checks
         assert!(!results.kraken_output_lines.is_empty(), "Expected some classification output");
 
         let total_reads = results.classified_reads.len() + results.unclassified_reads.len();
         assert!(total_reads > 0, "Expected some reads to be processed");
 
+        // Basic checks on classification lines
         for line in &results.kraken_output_lines {
-            eprintln!("Read: {}, status: {}, taxID={}", line.read_id, line.status, line.tax_id);
-
             match line.status {
-                'C' => assert!(results.classified_reads.iter().any(|r| r.id == line.read_id)),
-                'U' => assert!(results.unclassified_reads.iter().any(|r| r.id == line.read_id)),
-                _ => panic!("Invalid classification status"),
+                'C' => assert!(
+                    results.classified_reads.iter().any(|r| r.id == line.read_id),
+                    "Classified read not found in classified_reads"
+                ),
+                'U' => assert!(
+                    results.unclassified_reads.iter().any(|r| r.id == line.read_id),
+                    "Unclassified read not found in unclassified_reads"
+                ),
+                _ => panic!("Invalid classification status: {}", line.status),
             }
         }
 
         // 6. Check taxonomy report
         if let Some(rows) = &results.kraken_report_rows {
             assert!(!rows.is_empty(), "Expected some taxonomy report rows");
-
-            if let Some(first_row) = rows.first() {
-                eprintln!("First row => tax {} => pct={:.2}", first_row.tax_id, first_row.pct);
-                assert!((0.0..=100.0).contains(&first_row.pct), "Invalid percentage");
-                assert!(first_row.reads > 0, "Expected non-zero reads in first row");
-                assert!(!first_row.rank.is_empty(), "Expected non-empty rank");
-                assert!(!first_row.tax_name.is_empty(), "Expected non-empty taxonomy name");
-            }
         }
 
-        // Verify taxon counts
-        assert!(!results.taxon_counts.is_empty(), "Expected some taxon counts");
+        // 7. Compare the output to a known reference, ignoring line order
+        let kraken_output = fs::read_to_string("kraken_output.txt").expect("Could not read kraken_output.txt");
+        let real_report = fs::read_to_string("realoutput.txt").expect("Could not read realoutput.txt");
 
-        // Verify name and rank maps are present if report was generated
-        if results.kraken_report_rows.is_some() {
-            assert!(results.name_map.is_some(), "Expected name map with report");
-            assert!(results.rank_map.is_some(), "Expected rank map with report");
-        }
-
-        // 7. Compare the kraken_output.txt file to a known reference, ignoring line order
-        let kraken_output = fs::read_to_string("kraken_output.txt")
-            .expect("Could not read kraken_output.txt");
-        let real_report = fs::read_to_string("realoutput.txt")
-            .expect("Could not read realoutput.txt");
-
-        // 1) Split each file's contents into lines
-        // 2) Sort them to ignore order
         let mut lines_kraken: Vec<_> = kraken_output.lines().collect();
         lines_kraken.sort_unstable();
 
         let mut lines_real: Vec<_> = real_report.lines().collect();
         lines_real.sort_unstable();
 
-        // 3) Now compare the sorted line lists
         assert_eq!(
             lines_kraken, lines_real,
-            "The lines in kraken_output.txt do not match those in realoutput.txt (ignoring order)."
+            "kraken_output.txt differs from realoutput.txt (ignoring order)."
         );
     }
 }

@@ -14,7 +14,12 @@ flate2 = "1.0.35"  # for stable benchmarking
 ahash = "0.8.11"
 indicatif = "0.17.9"
 parking_lot = "0.12.3"
+env_logger = "0.11.6"
 
 [lib]
 path = "src/lib.rs"
 name = "krakenuniq_rs"
+
+[[bin]]
+path= "src/bin/krakenuniq_cli.rs"
+name="krakenuniq-rs"

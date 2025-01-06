@@ -1,6 +1,6 @@
 // src/classify/classify_stats.rs
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use crate::types::KrakenReportRow;
 use super::classify_sequence::TaxonCounts;
 use super::{ParentMap, NameMap, RankMap};
@@ -122,12 +122,19 @@ pub fn init_node_stats(
     stats_map
 }
 
-/// Recursively sum only the read-based statistics (not DB counts which are pre-calculated)
-pub fn accumulate_clade_stats(
+/// Recursively sum only the read-based statistics (not DB counts which are pre-calculated),
+/// **with cycle detection** to prevent infinite recursion.
+fn accumulate_clade_stats_inner(
     taxid: u32,
     children_map: &AHashMap<u32, Vec<u32>>,
     stats_map: &mut AHashMap<u32, NodeStats>,
+    visited: &mut AHashSet<u32>,
 ) -> (u32, usize, u32, u32) {
+    // If we’ve already visited this taxid in our recursion path => cycle
+    if !visited.insert(taxid) {
+        panic!("Cycle detected in taxonomy at taxon {}", taxid);
+    }
+
     // Ensure an entry exists
     if !stats_map.contains_key(&taxid) {
         stats_map.insert(taxid, NodeStats::default());
@@ -135,33 +142,46 @@ pub fn accumulate_clade_stats(
     let cur = stats_map[&taxid].clone();
 
     // Start with self
-    let mut total_reads = cur.self_reads;
+    let mut total_reads    = cur.self_reads;
     let mut total_distinct = cur.self_num_kmers_distinct;
     let mut total_coverage = cur.self_num_kmers_coverage;
-    let mut total_tax_db = cur.self_tax_kmers_db;
+    let mut total_tax_db   = cur.self_tax_kmers_db;
 
     // Recurse children
     if let Some(kids) = children_map.get(&taxid) {
         for &child in kids {
             let (c_reads, c_distinct, c_cov, c_tax_db) =
-                accumulate_clade_stats(child, children_map, stats_map);
+                accumulate_clade_stats_inner(child, children_map, stats_map, visited);
 
-            total_reads += c_reads;
+            total_reads    += c_reads;
             total_distinct += c_distinct;
             total_coverage += c_cov;
-            total_tax_db += c_tax_db;
+            total_tax_db   += c_tax_db;
         }
     }
 
     // Update parent's clade fields
     if let Some(node) = stats_map.get_mut(&taxid) {
-        node.clade_reads = total_reads;
+        node.clade_reads             = total_reads;
         node.clade_num_kmers_distinct = total_distinct;
         node.clade_num_kmers_coverage = total_coverage;
-        node.clade_tax_kmers_db = total_tax_db;
+        node.clade_tax_kmers_db     = total_tax_db;
     }
 
+    // Done processing this node => remove from visited set
+    visited.remove(&taxid);
+
     (total_reads, total_distinct, total_coverage, total_tax_db)
+}
+
+/// Public wrapper that initializes the `visited` set and calls the helper.
+pub fn accumulate_clade_stats(
+    taxid: u32,
+    children_map: &AHashMap<u32, Vec<u32>>,
+    stats_map: &mut AHashMap<u32, NodeStats>,
+) -> (u32, usize, u32, u32) {
+    let mut visited = AHashSet::new();
+    accumulate_clade_stats_inner(taxid, children_map, stats_map, &mut visited)
 }
 
 /// Build a Kraken-style report, but we no longer re-read the DB counts:
